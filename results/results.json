@@ -1,0 +1,57 @@
+{
+    "tests": [
+        {
+            "name": "Writeup (README.md)",
+            "score": 0.0,
+            "max_score": 5,
+            "status": "failed",
+            "output": "It looks like you haven't modified the starter README.md.\n",
+            "number": "0.1"
+        },
+        {
+            "name": "Compilation",
+            "score": 0.0,
+            "max_score": 10,
+            "status": "failed",
+            "output": "We could not compile your executables. Verify that your Makefile is valid.\n",
+            "number": "0.2"
+        },
+        {
+            "name": "Handshake: Client Hello",
+            "score": 0.0,
+            "max_score": 25,
+            "status": "failed",
+            "output": "",
+            "number": "1.1"
+        },
+        {
+            "name": "Handshake: Server Hello",
+            "score": 0.0,
+            "max_score": 20,
+            "status": "failed",
+            "output": "",
+            "number": "1.2"
+        },
+        {
+            "name": "Encrypt and MAC: Client",
+            "score": 0.0,
+            "max_score": 25,
+            "status": "failed",
+            "output": "",
+            "number": "1.3"
+        },
+        {
+            "name": "Encrypt and MAC: Server",
+            "score": 0.0,
+            "max_score": 20,
+            "status": "failed",
+            "output": "",
+            "number": "1.4"
+        }
+    ],
+    "leaderboard": [],
+    "visibility": "visible",
+    "execution_time": "2.15",
+    "score": 0.0,
+    "test_output_format": "md"
+}

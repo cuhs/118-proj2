@@ -21,20 +21,17 @@ static uint64_t read_be_uint(const uint8_t* bytes, size_t nbytes) {
     // TODO: parse an unsigned integer from a big-endian byte sequence.
     // Hint: this is used for certificate lifetime fields.
     //DONE?
-    if (bytes==NULL || nbytes == 0 || nbytes>8) [
+    if (bytes==NULL || nbytes == 0 || nbytes>8) {
         return 0;
-    ]
-    uint64_t result;
+    }
+    uint64_t result=0;
     for (int i=0; i<nbytes; i++) {
-        result+=bytes[i]<<(8*(nybtes-i-1));
+        result+=bytes[i]<<(8*(nbytes-i-1));
     }
     return result;
 }
 
 static bool parse_lifetime_window(const tlv* life, uint64_t* start_ts, uint64_t* end_ts) {
-    UNUSED(life);
-    UNUSED(start_ts);
-    UNUSED(end_ts);
     // TODO: decode [not_before || not_after] from CERTIFICATE/LIFETIME.
     // Return false on malformed input (NULL pointers, wrong length, invalid range).
     //DONE?
@@ -42,7 +39,7 @@ static bool parse_lifetime_window(const tlv* life, uint64_t* start_ts, uint64_t*
         return false;
     }
     *start_ts = read_be_uint(life->val, 8);
-    *end_ts = read_be_unit(life->val+8, 8);
+    *end_ts = read_be_uint(life->val+8, 8);
     if (*start_ts>*end_ts) 
         return false;
     return true;
@@ -55,7 +52,7 @@ static void enforce_lifetime_valid(const tlv* life) {
     //DONE?
     uint64_t start;
     uint64_t end;
-    if (!parse_lifetime_window(life, &start, &end);) {
+    if (!parse_lifetime_window(life, &start, &end)) {
         exit(6);
     }
     uint64_t curr = (uint64_t) time(NULL);
@@ -109,7 +106,7 @@ ssize_t input_sec(uint8_t* out_buf, size_t out_cap) {
         print("SEND CLIENT HELLO");
         // TODO: build CLIENT_HELLO with VERSION_TAG, NONCE, and PUBLIC_KEY TLVs.
         // Save client nonce for later key derivation and advance to CLIENT_SERVER_HELLO_AWAIT.
-        ssize_t len = serialize_tlv(out,buf, client_hello);
+        ssize_t len = serialize_tlv(out_buf, client_hello);
         state_sec = CLIENT_SERVER_HELLO_AWAIT;
         return len;
     }
@@ -120,7 +117,7 @@ ssize_t input_sec(uint8_t* out_buf, size_t out_cap) {
         server_hello = create_tlv(SERVER_HELLO);
          
         tlv* nonce = create_tlv(NONCE);
-        uint8_t randbuf;
+        uint8_t randbuf[NONCE_SIZE];
         generate_nonce(randbuf, NONCE_SIZE);
         add_val(nonce, randbuf, NONCE_SIZE);
         add_tlv(server_hello, nonce);
@@ -158,16 +155,44 @@ ssize_t input_sec(uint8_t* out_buf, size_t out_cap) {
         derive_keys(salt, 64);
 
 
-        ssize_t len=seralize_tlv(outbuf, server_hello);
+        ssize_t len=serialize_tlv(outbuf, server_hello);
         state_sec=DATA_STATE;
         return len;
     }
     case DATA_STATE: {
-        UNUSED(out_buf);
-        UNUSED(out_cap);
-        // TODO: read plaintext from stdin, encrypt it, compute MAC, serialize DATA TLV.
-        // If `inc_mac` is true, intentionally corrupt the MAC for testing.
-        return (ssize_t) 0;
+        uint8_t in_buf[2048];
+        ssize_t in_len = input_io(in_buf,sizeof(in_buf));
+        if (in_len<=0) return 0;
+
+        uint8_t iv_buf[IV_SIZE];
+        uint8_t cipher_buf[4096];
+        size_t cipher_len=encrypt_data(iv_buf,cipher_buf,in_buf,in_len);
+
+        tlv* data_tlv=create_tlv(DATA);
+        tlv* iv_tlv=create_tlv(IV);
+        add_val(iv_tlv, iv_buf, IV_SIZE);
+        add_tlv(data_tlv, iv_tlv);
+
+        tlv* c_tlv=create_tlv(CIPHERTEXT);
+        add_val(c_tlv,cipher_buf,(uint16_t) cipher_len);
+        
+        uint8_t to_mac[4096];
+        uint16_t m_len = 0;
+        m_len+=serialize_tlv(to_mac+m_len,iv_tlv);
+        m_len+=serialize_tlv(to_mac+m_len,c_tlv);
+
+        uint8_t mac_buf[MAC_SIZE];
+        hmac(mac_buf,to_mac,m_len);
+
+        if (inc_mac) mac_buf[0] ^= 0xFF; 
+        tlv* mac_tlv=create_tlv(MAC);
+        add_val(mac_tlv,mac_buf,MAC_SIZE);
+        add_tlv(data_tlv,mac_tlv);
+        add_tlv(data_tlv,c_tlv);
+
+        ssize_t len=serialize_tlv(out_buf,data_tlv);
+        free_tlv(data_tlv);
+        return len;
     }
     default:
         // TODO: handle unexpected states.
@@ -179,26 +204,138 @@ void output_sec(uint8_t* in_buf, size_t in_len) {
     switch (state_sec) {
     case SERVER_CLIENT_HELLO_AWAIT: {
         print("RECV CLIENT HELLO");
-        UNUSED(in_buf);
-        UNUSED(in_len);
-        // TODO: parse CLIENT_HELLO, validate required fields and protocol version.
-        // Load peer ephemeral key, store client nonce, and transition to SERVER_SERVER_HELLO_SEND.
+        client_hello = deserialize_tlv(in_buf,(uint16_t) in_len);
+        if (client_hello == NULL || client_hello->type!=CLIENT_HELLO) 
+            exit(6);
+
+        tlv *v = get_tlv(client_hello,VERSION_TAG);
+        if (v==NULL || v->length!=1 || v->val[0]!=PROTOCOL_VERSION) 
+            exit(6);
+
+        tlv *n = get_tlv(client_hello,NONCE);
+        if (n==NULL || n->length!=NONCE_SIZE)
+            exit(6);
+        
+        memcpy(client_nonce_buf, n->val, NONCE_SIZE);
+
+        tlv *pk = get_tlv(client_hello, PUBLIC_KEY);
+        if (pk==NULL) exit(6);
+
+        load_peer_public_key(pk->val, pk->length);
+
+        state_sec=SERVER_SERVER_HELLO_SEND;
         break;
     }
     case CLIENT_SERVER_HELLO_AWAIT: {
         print("RECV SERVER HELLO");
-        UNUSED(in_buf);
-        UNUSED(in_len);
+        server_hello = deserialize_tlv(in_buf, (uint16_t) in_len);
+
+        if (server_hello==NULL || server_hello->type!=SERVER_HELLO)
+            exit(6);
+        
+        tlv *cert = get_tlv(server_hello, CERTIFICATE);
+        if (cert==NULL)
+            exit(6);
+
+        tlv* cert_sign = get_tlv(cert,SIGNATURE);
+        if (cert_sign==NULL)
+            exit(6);
+
+        tlv* dns=get_tlv(cert,DNS_NAME);
+        tlv* life=get_tlv(cert, LIFETIME);
+        tlv* cert_pk=get_tlv(cert, PUBLIC_KEY);
+        if (dns==NULL || life==NULL || cert_pk==NULL) 
+            exit(6);
+
+        uint8_t cert_to_sign[4096];
+        uint16_t c_len=0;
+        c_len+=serialize_tlv(cert_to_sign, dns);
+        c_len+=serialize_tlv(cert_to_sign+c_len, cert_pk);
+        c_len+=serialize_tlv(cert_to_sign+c_len, life);
+
+        if (verify(cert_sign->val, cert_sign->length, cert_to_sign, c_len, ec_ca_public_key) != 1)
+            exit(1);
+
+        if (hostname!=NULL) {
+            size_t h_len=strlen(hostname);
+            bool match=false;
+            if (dns->length==h_len && memcmp(dns->val,hostname,h_len)==0) {
+                match=true;
+            }
+            else if (dns->length==h_len+1 && memcmp(dns->val,hostname,h_len)==0) {
+                match=true;
+            }
+            else if (dns->length>h_len && memcmp(dns->val,hostname,h_len)==0 && dns->val[h_len]=='\0') {
+                match=true;
+            }
+            if (!match) exit(2);
+        }
+
+        enforce_lifetime_valid(life);
+
+        tlv* n=get_tlv(server_hello, NONCE);
+        if (n==NULL || n->length!=NONCE_SIZE) 
+            exit(6);
+        memcpy(server_nonce_buf,n->val, NONCE_SIZE);
+
+        tlv* pk=get_tlv(server_hello, PUBLIC_KEY);
+        if (pk==NULL) exit(6);
+
+        tlv* hs_sign=get_tlv(server_hello,HANDSHAKE_SIGNATURE);
+        if (hs_sign==NULL)
+            exit(6);
+
+        uint8_t transcript[4096];
+        uint16_t t_len=0;
+        t_len+=serialize_tlv(transcript,client_hello);
+        t_len+=serialize_tlv(transcript+t_len,n);
+        t_len+=serialize_tlv(transcript+t_len,pk);
+
+        load_peer_public_key(cert_pk->val, cert_pk->length);
+        if (verify(hs_sign->val, hs_sign->length, transcript, t_len, ec_peer_public_key)!=1)
+            exit(3);
+        
+        load_peer_public_key(pk->val, pk->length);
+        derive_secret();
+        uint8_t salt[NONCE_SIZE*2];
+        memcpy(salt, client_nonce_buf, NONCE_SIZE);
+        memcpy(salt+NONCE_SIZE, server_nonce_buf, NONCE_SIZE);
+        derive_keys(salt,64);
+
+        state_sec=DATA_STATE;
+
         // TODO: parse SERVER_HELLO and verify certificate chain/lifetime/hostname.
         // Verify handshake signature, load server ephemeral key, derive keys, enter DATA_STATE.
         // Required exit codes: bad cert(1), bad identity(2), bad handshake sig(3), malformed(6).
         break;
     }
     case DATA_STATE: {
-        UNUSED(in_buf);
-        UNUSED(in_len);
         // TODO: parse DATA, verify MAC before decrypting, then output plaintext.
         // Required exit code: bad MAC(5), malformed(6).
+        tlv *data_tlv = deserialize_tlv(in_buf, (uint16_t)in_len);
+        if (data_tlv == NULL || data_tlv->type != DATA)
+            exit(6);
+
+        tlv *iv_tlv = get_tlv(data_tlv, IV);
+        tlv *mac_tlv = get_tlv(data_tlv, MAC);
+        tlv *c_tlv = get_tlv(data_tlv, CIPHERTEXT);
+        if (!iv_tlv || !mac_tlv || !c_tlv)
+            exit(6);
+
+        uint8_t to_mac[4096];
+        uint16_t m_len = 0;
+        m_len+=serialize_tlv(to_mac, iv_tlv);
+        m_len+=serialize_tlv(to_mac + m_len, c_tlv);
+
+        uint8_t mac_buf[MAC_SIZE];
+        hmac(mac_buf, to_mac, m_len);
+        if (memcmp(mac_buf, mac_tlv->val, MAC_SIZE) != 0)
+            exit(5);
+
+        uint8_t plain_buf[4096];
+        size_t plain_len=decrypt_cipher(plain_buf, c_tlv->val, c_tlv->length, iv_tlv->val);
+        output_io(plain_buf, plain_len);
+        free_tlv(data_tlv);
         break;
     }
     default:
